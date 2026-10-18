@@ -1,0 +1,71 @@
+# crates.io publication for the aor workspace, gated on the same
+# verification gate as local development (`scripts/verify.sh`).
+#
+# Trigger: push a version tag (`git tag v0.1.0 && git push origin v0.1.0`)
+# after the matching Cargo.toml versions. Layers publish in dependency
+# order — aor first, aor-store next, the aor-<gate> crates together,
+# aor-migrate, then aor-runtime last — and each layer retries until
+# crates.io's index admits the fresh dependency versions.
+#
+# Credentials: crates.io Trusted Publishing — each aor crate allowlists
+# this repo+workflow; the auth action exchanges the job's OIDC token for
+# a scoped short-lived crates.io token. No stored secret.
+name: publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: rustfmt, clippy
+      - run: scripts/verify.sh
+
+  publish:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: rust-lang/crates-io-auth-action@c6f97d42243bad5fab37ca0427f495c86d5b1a18 # v1.0.5
+        id: auth
+      - name: Publish in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          # crates.io's index can lag a fresh publish by tens of seconds;
+          # dependents only resolve once the layer below them is visible.
+          publish() {
+            # Idempotent: "already uploaded" is a skip, not a failure.
+            local log="/tmp/publish-$1.log"
+            for attempt in 1 2 3 4 5; do
+              if cargo publish -p "$1" --token "$CARGO_REGISTRY_TOKEN" 2>&1 | tee "$log"; then
+                return 0
+              fi
+              if grep -qi 'already uploaded\|already exists' "$log"; then
+                echo "$1 already published — skipping"
+                return 0
+              fi
+              sleep 30
+            done
+            echo "::error::could not publish $1"
+            return 1
+          }
+          publish aor
+          publish aor-store
+          for crate in aor-handoff aor-dispatch aor-payload aor-verify \
+                       aor-close aor-decision aor-resource aor-wait; do
+            publish "$crate"
+          done
+          publish aor-migrate
+          publish aor-runtime

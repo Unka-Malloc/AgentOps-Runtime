@@ -1,0 +1,23 @@
+[package]
+name = "aor-migrate"
+description = "AgentOps-Runtime tooling: one-time import and parity checks for absorbing external ledgers into the runtime's stores."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/Unka-Malloc/AgentOps-Runtime"
+readme = "../../README.md"
+keywords = ["aor", "agentops", "migrate", "import"]
+
+[lib]
+name = "aor_migrate"
+path = "src/lib.rs"
+
+[dependencies]
+aor = { path = "../..", version = "0.1.0" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

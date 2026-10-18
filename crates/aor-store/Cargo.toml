@@ -1,0 +1,22 @@
+[package]
+name = "aor-store"
+description = "AgentOps-Runtime store: production SQLite implementation of the aor::Store contract."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/Unka-Malloc/AgentOps-Runtime"
+readme = "../../README.md"
+keywords = ["aor", "agentops", "store", "sqlite"]
+
+[lib]
+name = "aor_store"
+path = "src/lib.rs"
+
+[dependencies]
+aor = { path = "../..", version = "0.1.0" }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

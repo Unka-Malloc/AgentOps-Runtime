@@ -1,0 +1,32 @@
+[package]
+name = "aor-runtime"
+description = "AgentOps-Runtime assembly: registers every aor-<gate> crate, drives observe/sweep over the shared stores, and produces the `aor` runtime binary."
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/Unka-Malloc/AgentOps-Runtime"
+readme = "../../README.md"
+keywords = ["aor", "agentops", "runtime"]
+
+[lib]
+name = "aor_runtime"
+path = "src/lib.rs"
+
+[[bin]]
+name = "aor"
+path = "src/bin/aor.rs"
+
+[dependencies]
+aor = { path = "../..", version = "0.1.0" }
+aor-close = { path = "../aor-close", version = "0.1.0" }
+aor-decision = { path = "../aor-decision", version = "0.1.0" }
+aor-dispatch = { path = "../aor-dispatch", version = "0.1.0" }
+aor-handoff = { path = "../aor-handoff", version = "0.1.0" }
+aor-migrate = { path = "../aor-migrate", version = "0.1.0" }
+aor-payload = { path = "../aor-payload", version = "0.1.0" }
+aor-resource = { path = "../aor-resource", version = "0.1.0" }
+aor-store = { path = "../aor-store", version = "0.1.0" }
+aor-verify = { path = "../aor-verify", version = "0.1.0" }
+aor-wait = { path = "../aor-wait", version = "0.1.0" }
+serde_json = "1"
