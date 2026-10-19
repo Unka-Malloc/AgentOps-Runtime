@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 /// Current schema version. Bump and append a migration step on change.
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 const MIGRATION_V1: &str = "
 CREATE TABLE IF NOT EXISTS records(
@@ -64,6 +64,14 @@ CREATE TABLE IF NOT EXISTS memory(
 CREATE INDEX IF NOT EXISTS idx_memory_kind ON memory(kind);
 ";
 
+/// v2: the observation stream becomes tamper-evident — each row carries
+/// the previous row's checksum and its own, so rewrite/reorder/delete
+/// inside the log breaks the chain and is detectable offline.
+const MIGRATION_V2: &str = "
+ALTER TABLE observations ADD COLUMN prev TEXT;
+ALTER TABLE observations ADD COLUMN hash TEXT;
+";
+
 fn err(e: impl std::fmt::Display) -> Error {
     Error::msg(e.to_string())
 }
@@ -107,6 +115,103 @@ impl SqliteStore {
     }
 }
 
+/// FNV-1a 64-bit checksum over `prev | ts | kind | detail`. This is a
+/// tamper-evidence chain, not a signature: it detects local edits,
+/// reordering and mid-log deletion; it does not prove authorship.
+fn chain_hash(prev: &str, ts_ms: u64, kind: &str, detail: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in prev
+        .as_bytes()
+        .iter()
+        .chain(ts_ms.to_be_bytes().iter())
+        .chain(kind.as_bytes().iter())
+        .chain(detail.as_bytes().iter())
+    {
+        h ^= u64::from(*byte);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
+}
+
+/// One row's chain state for `verify_chain`.
+struct ChainRow {
+    id: i64,
+    ts_ms: i64,
+    kind: String,
+    detail: String,
+    prev: Option<String>,
+    hash: Option<String>,
+}
+
+/// Outcome of walking the observation chain.
+pub struct ChainReport {
+    pub checked: u64,
+    /// Rows written before the chain existed (hash NULL); they anchor
+    /// nothing and are reported, not verified.
+    pub legacy: u64,
+    /// First row whose stored `prev`/`hash` disagree with recomputation.
+    pub broken_at: Option<i64>,
+}
+
+impl SqliteStore {
+    /// Re-walk the observation stream and recompute every checksum.
+    /// The first chained row must reference empty history; every later
+    /// row must reference the previous row's hash.
+    pub fn verify_chain(&self) -> aor::Result<ChainReport> {
+        let conn = self.lock()?;
+        let mut stmt = conn
+            .prepare("SELECT id, ts_ms, kind, detail, prev, hash FROM observations ORDER BY id")
+            .map_err(err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ChainRow {
+                    id: row.get(0)?,
+                    ts_ms: row.get(1)?,
+                    kind: row.get(2)?,
+                    detail: row.get(3)?,
+                    prev: row.get(4)?,
+                    hash: row.get(5)?,
+                })
+            })
+            .map_err(err)?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(err)?;
+        let mut report = ChainReport {
+            checked: 0,
+            legacy: 0,
+            broken_at: None,
+        };
+        let mut expected_prev = String::new();
+        let mut chaining = false;
+        for row in &rows {
+            let (Some(prev), Some(hash)) = (&row.prev, &row.hash) else {
+                if chaining {
+                    // An unchained row inside the chain means something
+                    // wrote past `append_observation` — that is a break.
+                    report.broken_at = Some(row.id);
+                    break;
+                }
+                report.legacy += 1;
+                continue;
+            };
+            if !chaining && !prev.is_empty() {
+                report.broken_at = Some(row.id);
+                break;
+            }
+            chaining = true;
+            report.checked += 1;
+            if *prev != expected_prev
+                || *hash != chain_hash(prev, row.ts_ms as u64, &row.kind, &row.detail)
+            {
+                report.broken_at = Some(row.id);
+                break;
+            }
+            expected_prev = hash.clone();
+        }
+        Ok(report)
+    }
+}
+
 fn home_dir() -> PathBuf {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -130,6 +235,16 @@ fn migrate(conn: &mut Connection) -> aor::Result<()> {
         tx.execute_batch(MIGRATION_V1).map_err(err)?;
         tx.execute(
             "INSERT INTO schema_migrations(version, applied_ms) VALUES (1, ?1)",
+            params![aor::now_ms() as i64],
+        )
+        .map_err(err)?;
+        tx.commit().map_err(err)?;
+    }
+    if version < 2 {
+        let tx = conn.transaction().map_err(err)?;
+        tx.execute_batch(MIGRATION_V2).map_err(err)?;
+        tx.execute(
+            "INSERT INTO schema_migrations(version, applied_ms) VALUES (2, ?1)",
             params![aor::now_ms() as i64],
         )
         .map_err(err)?;
@@ -230,13 +345,19 @@ impl Store for SqliteStore {
         ts_ms: u64,
     ) -> aor::Result<i64> {
         let conn = self.lock()?;
+        let detail = serde_json::to_string(detail).map_err(err)?;
+        let prev: String = conn
+            .query_row(
+                "SELECT COALESCE(hash, '') FROM observations ORDER BY id DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
+        let hash = chain_hash(&prev, ts_ms, kind, &detail);
         conn.execute(
-            "INSERT INTO observations(ts_ms, kind, detail) VALUES (?1, ?2, ?3)",
-            params![
-                ts_ms as i64,
-                kind,
-                serde_json::to_string(detail).map_err(err)?
-            ],
+            "INSERT INTO observations(ts_ms, kind, detail, prev, hash)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![ts_ms as i64, kind, detail, prev, hash],
         )
         .map_err(err)?;
         Ok(conn.last_insert_rowid())
@@ -564,6 +685,66 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(applied, 1);
+        assert_eq!(applied, SCHEMA_VERSION);
+    }
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    use aor::Store;
+
+    fn db() -> (tempfile::TempDir, SqliteStore) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SqliteStore::open(dir.path().join("c.db")).unwrap();
+        (dir, store)
+    }
+
+    #[test]
+    fn chain_verifies_and_detects_tamper() {
+        let (_d, store) = db();
+        store
+            .append_observation("k", &serde_json::json!({"a":1}), 1000)
+            .unwrap();
+        store
+            .append_observation("k", &serde_json::json!({"b":2}), 2000)
+            .unwrap();
+        let r = store.verify_chain().unwrap();
+        assert_eq!(r.checked, 2);
+        assert_eq!(r.legacy, 0);
+        assert_eq!(r.broken_at, None);
+
+        // Rewrite the first row's detail behind the store's back.
+        store
+            .lock()
+            .unwrap()
+            .execute("UPDATE observations SET detail='{\"a\":9}' WHERE id=1", [])
+            .unwrap();
+        let r = store.verify_chain().unwrap();
+        assert_eq!(r.broken_at, Some(1));
+    }
+
+    #[test]
+    fn legacy_unchained_rows_report_without_breaking() {
+        let (_d, store) = db();
+        // Simulate a pre-chain row by nulling the columns.
+        store
+            .append_observation("k", &serde_json::json!({"x":0}), 500)
+            .unwrap();
+        store
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE observations SET prev=NULL, hash=NULL WHERE id=1",
+                [],
+            )
+            .unwrap();
+        store
+            .append_observation("k", &serde_json::json!({"y":1}), 600)
+            .unwrap();
+        let r = store.verify_chain().unwrap();
+        assert_eq!(r.legacy, 1);
+        assert_eq!(r.checked, 1);
+        assert_eq!(r.broken_at, None);
     }
 }

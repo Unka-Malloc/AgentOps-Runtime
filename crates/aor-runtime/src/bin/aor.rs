@@ -22,6 +22,57 @@ fn open_runtime() -> aor::Result<Runtime> {
     Ok(Runtime::new(Box::new(store), Box::new(artifacts)))
 }
 
+/// Tool updaters this CLI may run. The update logic stays in each
+/// tool's own script (locking, version checks, restart steps); aor
+/// contributes the enable switch and observed, recorded execution.
+const UPDATERS: &[(&str, &str)] = &[
+    ("deepseek-harness", ".local/libexec/deepseek-harness-update"),
+    ("codex-cli", ".codex/bin/codex-cli-auto-update.sh"),
+];
+
+fn run_updates() -> aor::Result<()> {
+    let home = data_home();
+    let cfg_path = home.join("config.json");
+    let cfg: serde_json::Value = std::fs::read_to_string(&cfg_path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(serde_json::Value::Null);
+    let enabled = cfg
+        .get("auto_update")
+        .and_then(serde_json::Value::as_object);
+    let rt = open_runtime()?;
+    let mut ran = false;
+    for (name, rel_script) in UPDATERS {
+        if enabled.and_then(|m| m.get(*name)) != Some(&serde_json::Value::Bool(true)) {
+            continue;
+        }
+        ran = true;
+        let script = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rel_script);
+        let detail = serde_json::json!({"tool": name, "script": script});
+        let findings = rt.dispatch(&Event::new(EventKind::ToolCall, detail.clone()))?;
+        let out = render_findings(&findings);
+        if !out.is_empty() {
+            println!("{out}");
+        }
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg(&script)
+            .status()
+            .map_err(|e| aor::Error::msg(format!("launch {name}: {e}")))?;
+        let code = status.code().unwrap_or(-1);
+        rt.store().append_observation(
+            "auto-update",
+            &serde_json::json!({"tool": name, "exit": code}),
+            aor::now_ms(),
+        )?;
+        println!("update {name}: exit {code}");
+    }
+    if !ran {
+        println!("no auto_update tools enabled in {}", cfg_path.display());
+    }
+    Ok(())
+}
+
 fn flag_value(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
@@ -31,7 +82,7 @@ fn flag_value(args: &[String], name: &str) -> Option<String> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  aor registry\n  aor observe <dispatch|compact|verify|close|toolcall> '<json>'\n  aor check <dispatch|compact|verify|close|toolcall> '<json>'\n        exit 0 allow, 10 warn, 20 refuse — the outbound-boundary entry\n  aor sweep\n  aor records [--gate G] [--limit N]\n  aor memory list [--kind K] [--limit N]\n  aor memory add --kind K --title T --body B [--tags a,b] [--source S]\n  aor import sqlite <db> <table> <kind>\n  aor import vault <dir>\n  aor import inbox <file>"
+        "usage:\n  aor registry\n  aor observe <dispatch|compact|verify|close|toolcall> '<json>'\n  aor check <dispatch|compact|verify|close|toolcall> '<json>'\n        exit 0 allow, 10 warn, 20 refuse — the outbound-boundary entry\n  aor sweep\n  aor update                        run auto_update tools enabled in config.json\n  aor verify-chain                  re-check the observation tamper-evidence chain\n  aor records [--gate G] [--limit N]\n  aor memory list [--kind K] [--limit N]\n  aor memory add --kind K --title T --body B [--tags a,b] [--source S]\n  aor import sqlite <db> <table> <kind>\n  aor import vault <dir>\n  aor import inbox <file>"
     );
     std::process::exit(2)
 }
@@ -116,6 +167,23 @@ fn run() -> aor::Result<()> {
                     println!("verdict: refuse");
                     std::process::exit(20);
                 }
+            }
+        }
+        Some("update") => run_updates()?,
+        Some("verify-chain") => {
+            let store = aor_store::SqliteStore::open(data_home().join("agentops.db"))?;
+            let report = store.verify_chain()?;
+            println!(
+                "checked={} legacy={} broken_at={}",
+                report.checked,
+                report.legacy,
+                report
+                    .broken_at
+                    .map(|id| id.to_string())
+                    .unwrap_or_else(|| "none".into())
+            );
+            if report.broken_at.is_some() {
+                std::process::exit(20);
             }
         }
         Some("sweep") => {
