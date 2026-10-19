@@ -65,11 +65,31 @@ impl Runtime {
         }
     }
 
+    #[cfg(test)]
+    fn with_gates(
+        store: Box<dyn Store>,
+        artifacts: Box<dyn ArtifactSink>,
+        gates: Vec<Box<dyn Gate>>,
+    ) -> Self {
+        Self {
+            store,
+            artifacts,
+            gates,
+        }
+    }
+
     /// Route one host event through every gate. Returns all findings;
-    /// emitted records and the raw observation are persisted.
+    /// emitted records and the raw observation are persisted. A gate's
+    /// failure never propagates to a sibling: it is caught, recorded as
+    /// a durable observation and reported as a runtime-attributed
+    /// finding, and the fan-out continues.
     pub fn dispatch(&self, event: &Event) -> Result<Vec<Finding>> {
+        let kind = serde_json::to_value(event.kind)
+            .ok()
+            .and_then(|v| v.as_str().map(str::to_owned))
+            .unwrap_or_else(|| format!("{:?}", event.kind));
         self.store
-            .append_observation(&format!("{:?}", event.kind), &event.detail, event.ts_ms)?;
+            .append_observation(&kind, &event.detail, event.ts_ms)?;
         let mut findings = Vec::new();
         for gate in &self.gates {
             let mut ctx = Ctx {
@@ -77,7 +97,10 @@ impl Runtime {
                 artifacts: &*self.artifacts,
                 emitted: Vec::new(),
             };
-            findings.extend(gate.observe(event, &mut ctx)?);
+            match gate.observe(event, &mut ctx) {
+                Ok(found) => findings.extend(found),
+                Err(e) => findings.push(self.gate_failure("observe", &**gate, &e)),
+            }
             for record in ctx.emitted {
                 self.store.append_record(&record)?;
             }
@@ -97,12 +120,30 @@ impl Runtime {
                 artifacts: &*self.artifacts,
                 emitted: Vec::new(),
             };
-            findings.extend(gate.sweep(&mut ctx)?);
+            match gate.sweep(&mut ctx) {
+                Ok(found) => findings.extend(found),
+                Err(e) => findings.push(self.gate_failure("sweep", &**gate, &e)),
+            }
             for record in ctx.emitted {
                 self.store.append_record(&record)?;
             }
         }
         Ok(findings)
+    }
+
+    /// Attribute a gate's failure durably — an observation row for
+    /// forensics plus a finding so the host's verdict sees the hole.
+    fn gate_failure(&self, stage: &str, gate: &dyn Gate, e: &aor::Error) -> Finding {
+        let name = gate.descriptor().name;
+        let detail = serde_json::json!({"gate": name, "stage": stage, "error": e.to_string()});
+        let _ = self
+            .store
+            .append_observation("gate-error", &detail, aor::now_ms());
+        Finding::new(
+            "runtime",
+            Severity::High,
+            format!("gate {name} {stage} failed: {e}"),
+        )
     }
 
     pub fn store(&self) -> &dyn Store {
@@ -220,13 +261,58 @@ mod tests {
     #[test]
     fn dispatch_persists_raw_observation() {
         let (rt, store) = rt();
-        let _ = rt.dispatch(&Event::new(
+        rt.dispatch(&Event::new(
             EventKind::ToolCall,
             serde_json::json!({"tool": "x"}),
-        ));
-        // observation stream receives the event even when no gate fires
-        assert!(store.counter_count("nope", 0).is_ok());
+        ))
+        .unwrap();
+        // the raw observation lands even when no gate fires
+        assert_eq!(store.observation_count(), 1);
         drop(store);
+    }
+
+    /// A gate that always fails — proves a gate error cannot starve its
+    /// siblings (isolation is this workspace's first invariant).
+    struct BrokenGate;
+    impl Gate for BrokenGate {
+        fn descriptor(&self) -> &'static aor::GateDescriptor {
+            static D: aor::GateDescriptor = aor::GateDescriptor {
+                name: "broken",
+                summary: "always fails",
+                profiles: &[],
+            };
+            &D
+        }
+        fn observe(&self, _e: &Event, _c: &mut dyn aor::GateContext) -> Result<Vec<Finding>> {
+            Err(aor::Error::msg("boom"))
+        }
+    }
+
+    #[test]
+    fn a_failing_gate_is_isolated_and_reported() {
+        let store = std::sync::Arc::new(MemStore::new());
+        let rt = Runtime::with_gates(
+            Box::new(ArcStore(store.clone())),
+            Box::new(MemArtifacts::new()),
+            vec![Box::new(BrokenGate), Box::new(aor_wait::WaitGate)],
+        );
+        let findings = rt
+            .dispatch(&Event::new(
+                EventKind::ToolCall,
+                serde_json::json!({"tool": "x"}),
+            ))
+            .unwrap();
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.gate == "runtime" && f.message.contains("broken")),
+            "gate failure must surface as a runtime finding"
+        );
+        // a sibling gate still received the event
+        assert!(
+            store.observation_count() >= 2,
+            "raw event + gate-error observation both persisted"
+        );
     }
 
     #[test]

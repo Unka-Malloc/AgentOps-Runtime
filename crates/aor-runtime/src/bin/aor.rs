@@ -1,18 +1,24 @@
 //! aor — AgentOps-Runtime CLI.
 //!
-//! Subcommands: registry | observe | sweep | records | memory | import.
+//! Subcommands: registry | observe | check | serve | sweep | update |
+//! verify-chain | records | memory | import. `check` answers a gate
+//! verdict for one event (exit 0/10/20); `serve` keeps the runtime
+//! resident behind NDJSON for non-Rust hosts; `update` runs the tool
+//! updaters named by `auto_update` in config.json; `verify-chain`
+//! re-checks the observation tamper-evidence chain.
 //! Data home: `$AGENTOPS_HOME` or `~/.agentops` (agentops.db + artifacts/).
 
 use aor::{Enforcement, Event, EventKind, MemoryEntry, ProfileState};
 use aor_runtime::{gate_descriptors, render_findings, Runtime};
 use std::path::PathBuf;
 
+/// The data directory is where the canonical store lives — derive it
+/// from the store's own default so the two never drift.
 fn data_home() -> PathBuf {
-    if let Ok(h) = std::env::var("AGENTOPS_HOME") {
-        return PathBuf::from(h);
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
-    PathBuf::from(home).join(".agentops")
+    aor_store::SqliteStore::default_path()
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(".agentops"))
 }
 
 fn open_runtime() -> aor::Result<Runtime> {

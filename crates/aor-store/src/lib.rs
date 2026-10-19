@@ -9,7 +9,7 @@
 //! `DESCRIPTOR` and implements no `Gate`.
 
 use aor::{Enforcement, Error, MemoryEntry, Record, Severity, Store, Todo};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -346,12 +346,16 @@ impl Store for SqliteStore {
     ) -> aor::Result<i64> {
         let conn = self.lock()?;
         let detail = serde_json::to_string(detail).map_err(err)?;
+        // An empty table and a real query error must not look alike: a
+        // swallowed error would silently re-anchor the hash chain.
         let prev: String = conn
             .query_row(
                 "SELECT COALESCE(hash, '') FROM observations ORDER BY id DESC LIMIT 1",
                 [],
                 |row| row.get(0),
             )
+            .optional()
+            .map_err(err)?
             .unwrap_or_default();
         let hash = chain_hash(&prev, ts_ms, kind, &detail);
         conn.execute(

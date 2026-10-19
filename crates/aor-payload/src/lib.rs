@@ -29,9 +29,8 @@ pub const WARN_BYTES: usize = 64 * 1024;
 /// Serialized payload size at which the gate escalates to High.
 pub const HIGH_BYTES: usize = 256 * 1024;
 
-/// Declared coverage: the size budget applies identically on the
-/// managed-dispatch channel (fail-closed adapter) and the hook-observe
-/// channel.
+/// Declared coverage: the size budget applies identically on
+/// managed-dispatch, hook-observe and outbound-boundary.
 const PROFILES: &[Profile] = &[
     Profile::new(Enforcement::ManagedDispatch, ProfileState::Implemented),
     Profile::new(Enforcement::HookObserve, ProfileState::Implemented),

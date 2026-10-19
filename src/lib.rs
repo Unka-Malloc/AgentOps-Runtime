@@ -352,6 +352,12 @@ pub mod mem {
         pub fn new() -> Self {
             Self::default()
         }
+
+        /// Rows appended so far — the only read path observations have
+        /// (they are write-side evidence, not a query surface).
+        pub fn observation_count(&self) -> usize {
+            self.state.lock().map(|s| s.observations.len()).unwrap_or(0)
+        }
     }
 
     impl Store for MemStore {

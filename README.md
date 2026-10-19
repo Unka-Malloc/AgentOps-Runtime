@@ -57,12 +57,12 @@ strengths depending on which adapter executes it:
 Every channel a gate applies to is declared in the gate's `profiles`;
 partial support is `Incomplete`, never silently dropped.
 
-## Storage (planned)
+## Storage
 
-SQLite is the single source of truth — `records`, `rot_ledger`,
-`todos_gates`, `memory`. Markdown, dashboards and any vault export are
-read-only projections. Existing ledgers and curated notes migrate
-through a one-time import with parity checks.
+SQLite is the single source of truth — `records`, `observations`
+(tamper-evident hash-chained), `counters`, `todos`, `memory`. Markdown,
+dashboards and any vault export are read-only projections. Existing
+ledgers and curated notes migrate through `aor import`.
 
 ## Verify
 

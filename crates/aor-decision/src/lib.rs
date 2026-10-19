@@ -175,38 +175,12 @@ impl Gate for DecisionGate {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aor::mem::{MemStore, TestContext};
-    use aor::{Error, EventKind};
+    use aor::mem::{MemArtifacts, MemStore, TestContext};
+    use aor::EventKind;
     use serde_json::json;
-    use std::collections::HashMap;
-    use std::sync::Mutex;
 
-    /// Name-keyed artifact sink: artifact id == write name, so the
-    /// gate's `memo/<id>.json` reads resolve like `FsArtifacts` does.
-    #[derive(Default)]
-    struct NameArtifacts(Mutex<HashMap<String, Vec<u8>>>);
-
-    impl ArtifactSink for NameArtifacts {
-        fn write(&self, name: &str, bytes: &[u8]) -> aor::Result<String> {
-            self.0
-                .lock()
-                .map_err(|e| Error::msg(e.to_string()))?
-                .insert(name.to_string(), bytes.to_vec());
-            Ok(name.to_string())
-        }
-
-        fn read(&self, artifact: &str) -> aor::Result<Vec<u8>> {
-            self.0
-                .lock()
-                .map_err(|e| Error::msg(e.to_string()))?
-                .get(artifact)
-                .cloned()
-                .ok_or_else(|| Error::msg(format!("artifact not found: {artifact}")))
-        }
-    }
-
-    fn ctx() -> TestContext<MemStore, NameArtifacts> {
-        TestContext::new(MemStore::new(), NameArtifacts::default())
+    fn ctx() -> TestContext {
+        TestContext::new(MemStore::new(), MemArtifacts::new())
     }
 
     fn memo() -> DecisionMemo {
