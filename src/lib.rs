@@ -452,19 +452,44 @@ pub mod mem {
         }
     }
 
+    impl FsArtifacts {
+        /// Resolve `name` inside `root`, refusing `..`, root and prefix
+        /// components so an artifact id can never escape the sink.
+        fn contained(&self, name: &str) -> Result<(std::path::PathBuf, String)> {
+            use std::path::Component;
+            let mut rel = std::path::PathBuf::new();
+            for component in std::path::Path::new(name).components() {
+                match component {
+                    Component::Normal(seg) => rel.push(seg),
+                    Component::CurDir => {}
+                    _ => {
+                        return Err(Error::msg(format!(
+                            "artifact name escapes the sink root: {name}"
+                        )))
+                    }
+                }
+            }
+            if rel.as_os_str().is_empty() {
+                return Err(Error::msg("empty artifact name"));
+            }
+            let id = rel.to_string_lossy().to_string();
+            Ok((self.root.join(&rel), id))
+        }
+    }
+
     impl ArtifactSink for FsArtifacts {
         fn write(&self, name: &str, bytes: &[u8]) -> Result<String> {
-            let rel = name.trim_start_matches('/');
-            let path = self.root.join(rel);
+            let (path, id) = self.contained(name)?;
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| Error::msg(e.to_string()))?;
             }
             std::fs::write(&path, bytes).map_err(|e| Error::msg(e.to_string()))?;
-            Ok(rel.to_string())
+            Ok(id)
         }
 
         fn read(&self, artifact: &str) -> Result<Vec<u8>> {
-            std::fs::read(self.root.join(artifact)).map_err(|e| Error::msg(e.to_string()))
+            let (path, _) = self.contained(artifact)?;
+            std::fs::read(path).map_err(|e| Error::msg(e.to_string()))
         }
     }
 
@@ -500,5 +525,25 @@ pub mod mem {
         fn emit(&mut self, record: Record) {
             self.emitted.push(record);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::mem::FsArtifacts;
+    use super::ArtifactSink;
+
+    #[test]
+    fn fs_artifacts_refuses_escape_names() {
+        let dir = std::env::temp_dir().join(format!("aor-fsart-{}", std::process::id()));
+        let sink = FsArtifacts::new(&dir);
+        for name in ["../evil", "/abs/evil", "a/../../b", "..", "/"] {
+            assert!(sink.write(name, b"x").is_err(), "accepted {name}");
+            assert!(sink.read(name).is_err(), "read {name}");
+        }
+        let id = sink.write("memo/ok.json", b"{}").unwrap();
+        assert_eq!(id, "memo/ok.json");
+        assert_eq!(sink.read(&id).unwrap(), b"{}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }
