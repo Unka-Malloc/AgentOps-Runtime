@@ -250,8 +250,13 @@ fn migrate(conn: &mut Connection) -> aor::Result<()> {
         .map_err(err)?;
         tx.commit().map_err(err)?;
     }
-    conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-        .map_err(err)?;
+    // Only stamp the header when a migration actually ran — an
+    // unconditional pragma_update turns every read-only open into a
+    // committed write.
+    if version < SCHEMA_VERSION {
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(err)?;
+    }
     Ok(())
 }
 

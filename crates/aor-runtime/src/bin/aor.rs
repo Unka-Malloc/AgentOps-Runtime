@@ -45,8 +45,18 @@ fn serve() -> aor::Result<()> {
         if line.trim().is_empty() {
             continue;
         }
-        let req: serde_json::Value = serde_json::from_str(&line)
-            .map_err(|e| aor::Error::msg(format!("bad request line: {e}")))?;
+        // A malformed line is a per-request error, never a fatal one:
+        // the sidecar must survive bad input and keep serving.
+        let req: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(e) => {
+                let reply =
+                    serde_json::json!({"id": null, "error": format!("bad request line: {e}")});
+                writeln!(out, "{reply}").map_err(|e| aor::Error::msg(e.to_string()))?;
+                out.flush().map_err(|e| aor::Error::msg(e.to_string()))?;
+                continue;
+            }
+        };
         let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
         let method = req.get("method").and_then(serde_json::Value::as_str);
         let params = req
