@@ -186,6 +186,7 @@ impl Gate for ResourceGate {
 const PROFILES: &[Profile] = &[
     Profile::new(Enforcement::ManagedDispatch, ProfileState::Implemented),
     Profile::new(Enforcement::HookObserve, ProfileState::Implemented),
+    Profile::new(Enforcement::OutboundBoundary, ProfileState::Implemented),
 ];
 
 pub const DESCRIPTOR: GateDescriptor = GateDescriptor {
@@ -372,10 +373,10 @@ exclusive = true
     }
 
     #[test]
-    fn descriptor_declares_both_channels_implemented() {
+    fn descriptor_declares_all_channels_implemented() {
         let d = ResourceGate.descriptor();
         assert_eq!(d.name, "resource");
-        assert_eq!(d.profiles.len(), 2);
+        assert_eq!(d.profiles.len(), 3);
         assert!(d
             .profiles
             .iter()

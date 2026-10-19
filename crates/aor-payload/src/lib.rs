@@ -35,6 +35,7 @@ pub const HIGH_BYTES: usize = 256 * 1024;
 const PROFILES: &[Profile] = &[
     Profile::new(Enforcement::ManagedDispatch, ProfileState::Implemented),
     Profile::new(Enforcement::HookObserve, ProfileState::Implemented),
+    Profile::new(Enforcement::OutboundBoundary, ProfileState::Implemented),
 ];
 
 pub const DESCRIPTOR: GateDescriptor = GateDescriptor {
