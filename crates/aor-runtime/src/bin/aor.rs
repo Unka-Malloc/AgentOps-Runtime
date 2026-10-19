@@ -22,6 +22,78 @@ fn open_runtime() -> aor::Result<Runtime> {
     Ok(Runtime::new(Box::new(store), Box::new(artifacts)))
 }
 
+/// NDJSON sidecar: one `aor serve` process keeps the store open and
+/// answers one JSON request per stdin line — the same role `a4aa serve`
+/// plays for agent runtimes, for hosts that are not Rust. Requests:
+///   {"id":N,"method":"observe|check","params":{"kind":K,"detail":{}}}
+///   {"id":N,"method":"sweep"}   {"id":N,"method":"records","params":{"limit":M}}
+/// Replies: {"id":N,"result":{...}} or {"id":N,"error":"..."}.
+fn serve() -> aor::Result<()> {
+    use std::io::{BufRead, Write};
+    let rt = open_runtime()?;
+    let stdin = std::io::stdin();
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    for line in stdin.lock().lines() {
+        let line = line.map_err(|e| aor::Error::msg(e.to_string()))?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let req: serde_json::Value = serde_json::from_str(&line)
+            .map_err(|e| aor::Error::msg(format!("bad request line: {e}")))?;
+        let id = req.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let method = req.get("method").and_then(serde_json::Value::as_str);
+        let params = req
+            .get("params")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let reply = |result: serde_json::Value| serde_json::json!({"id": id, "result": result});
+        let answer = match method {
+            Some("observe") | Some("check") => {
+                let kind = params
+                    .get("kind")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(event_kind);
+                match kind {
+                    Some(kind) => {
+                        let detail = params
+                            .get("detail")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null);
+                        match rt.dispatch(&Event::new(kind, detail)) {
+                            Ok(findings) => reply(serde_json::json!({
+                                "findings": findings,
+                                "verdict": aor::Verdict::of(&findings),
+                            })),
+                            Err(e) => serde_json::json!({"id": id, "error": e.to_string()}),
+                        }
+                    }
+                    None => serde_json::json!({"id": id, "error": "unknown event kind"}),
+                }
+            }
+            Some("sweep") => match rt.sweep() {
+                Ok(findings) => reply(serde_json::json!({"findings": findings})),
+                Err(e) => serde_json::json!({"id": id, "error": e.to_string()}),
+            },
+            Some("records") => {
+                let limit = params
+                    .get("limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(50) as usize;
+                let gate = params.get("gate").and_then(serde_json::Value::as_str);
+                match rt.store().records(gate, limit) {
+                    Ok(rs) => reply(serde_json::json!({"records": rs})),
+                    Err(e) => serde_json::json!({"id": id, "error": e.to_string()}),
+                }
+            }
+            _ => serde_json::json!({"id": id, "error": "unknown method"}),
+        };
+        writeln!(out, "{answer}").map_err(|e| aor::Error::msg(e.to_string()))?;
+        out.flush().map_err(|e| aor::Error::msg(e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Tool updaters this CLI may run. The update logic stays in each
 /// tool's own script (locking, version checks, restart steps); aor
 /// contributes the enable switch and observed, recorded execution.
@@ -169,6 +241,7 @@ fn run() -> aor::Result<()> {
                 }
             }
         }
+        Some("serve") => serve()?,
         Some("update") => run_updates()?,
         Some("verify-chain") => {
             let store = aor_store::SqliteStore::open(data_home().join("agentops.db"))?;
