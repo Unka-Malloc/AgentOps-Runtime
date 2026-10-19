@@ -94,14 +94,11 @@ fn serve() -> aor::Result<()> {
     Ok(())
 }
 
-/// Tool updaters this CLI may run. The update logic stays in each
-/// tool's own script (locking, version checks, restart steps); aor
-/// contributes the enable switch and observed, recorded execution.
-const UPDATERS: &[(&str, &str)] = &[
-    ("deepseek-harness", ".local/libexec/deepseek-harness-update"),
-    ("codex-cli", ".codex/bin/codex-cli-auto-update.sh"),
-];
-
+/// `auto_update` in config.json maps a tool name to its updater script
+/// (relative to $HOME, or absolute). A `false` value disables the entry.
+/// The update logic stays in each tool's own script (locking, version
+/// checks, restart steps); aor contributes the enable switch and
+/// observed, recorded execution.
 fn run_updates() -> aor::Result<()> {
     let home = data_home();
     let cfg_path = home.join("config.json");
@@ -109,17 +106,23 @@ fn run_updates() -> aor::Result<()> {
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(serde_json::Value::Null);
-    let enabled = cfg
+    let jobs = cfg
         .get("auto_update")
-        .and_then(serde_json::Value::as_object);
+        .and_then(serde_json::Value::as_object)
+        .cloned()
+        .unwrap_or_default();
     let rt = open_runtime()?;
     let mut ran = false;
-    for (name, rel_script) in UPDATERS {
-        if enabled.and_then(|m| m.get(*name)) != Some(&serde_json::Value::Bool(true)) {
+    for (name, spec) in &jobs {
+        let Some(rel_script) = spec.as_str() else {
             continue;
-        }
+        };
         ran = true;
-        let script = PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rel_script);
+        let script = if rel_script.starts_with('/') {
+            PathBuf::from(rel_script)
+        } else {
+            PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(rel_script)
+        };
         let detail = serde_json::json!({"tool": name, "script": script});
         let findings = rt.dispatch(&Event::new(EventKind::ToolCall, detail.clone()))?;
         let out = render_findings(&findings);

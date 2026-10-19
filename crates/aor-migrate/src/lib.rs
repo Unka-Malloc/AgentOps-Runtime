@@ -149,7 +149,7 @@ pub fn import_sqlite_table(
 }
 
 /// Interpret a column value as an epoch-milliseconds timestamp. Values
-/// below 1e12 are epoch *seconds* (the anti-rot ledger stores REAL
+/// below 1e12 are epoch *seconds* (source ledgers may store REAL
 /// seconds); at or above they are already milliseconds.
 fn value_as_ms(v: &ValueRef<'_>) -> Option<u64> {
     let raw = match v {
