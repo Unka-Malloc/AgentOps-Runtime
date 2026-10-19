@@ -18,7 +18,6 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
   verify:
@@ -33,6 +32,9 @@ jobs:
   publish:
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -49,7 +51,7 @@ jobs:
             # Idempotent: "already uploaded" is a skip, not a failure.
             local log="/tmp/publish-$1.log"
             for attempt in 1 2 3 4 5; do
-              if cargo publish -p "$1" --token "$CARGO_REGISTRY_TOKEN" 2>&1 | tee "$log"; then
+              if cargo publish -p "$1" 2>&1 | tee "$log"; then
                 return 0
               fi
               if grep -qi 'already uploaded\|already exists' "$log"; then
