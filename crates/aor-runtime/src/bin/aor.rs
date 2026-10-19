@@ -135,6 +135,17 @@ fn run_updates() -> aor::Result<()> {
         if !out.is_empty() {
             println!("{out}");
         }
+        // aor is the executor on this channel: a Refuse verdict skips
+        // the script — the run is recorded, not silently overridden.
+        if aor::Verdict::of(&findings).refused() {
+            rt.store().append_observation(
+                "auto-update",
+                &serde_json::json!({"tool": name, "skipped": "refused"}),
+                aor::now_ms(),
+            )?;
+            println!("update {name}: refused");
+            continue;
+        }
         let status = std::process::Command::new("/bin/sh")
             .arg("-c")
             .arg(&script)
@@ -163,7 +174,7 @@ fn flag_value(args: &[String], name: &str) -> Option<String> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  aor registry\n  aor observe <dispatch|compact|verify|close|toolcall> '<json>'\n  aor check <dispatch|compact|verify|close|toolcall> '<json>'\n        exit 0 allow, 10 warn, 20 refuse — the outbound-boundary entry\n  aor sweep\n  aor update                        run auto_update tools enabled in config.json\n  aor verify-chain                  re-check the observation tamper-evidence chain\n  aor records [--gate G] [--limit N]\n  aor memory list [--kind K] [--limit N]\n  aor memory add --kind K --title T --body B [--tags a,b] [--source S]\n  aor import sqlite <db> <table> <kind>\n  aor import vault <dir>\n  aor import inbox <file>"
+        "usage:\n  aor registry\n  aor observe <dispatch|compact|verify|close|toolcall> '<json>'\n  aor check <dispatch|compact|verify|close|toolcall> '<json>'\n        exit 0 allow, 10 warn, 20 refuse — the outbound-boundary entry\n  aor serve                         NDJSON sidecar: {{id, method, params}} per line — observe/check/sweep/records\n  aor sweep\n  aor update                        run auto_update tools enabled in config.json\n  aor verify-chain                  re-check the observation tamper-evidence chain\n  aor records [--gate G] [--limit N]\n  aor memory list [--kind K] [--limit N]\n  aor memory add --kind K --title T --body B [--tags a,b] [--source S]\n  aor import sqlite <db> <table> <kind>\n  aor import vault <dir>\n  aor import inbox <file>"
     );
     std::process::exit(2)
 }
