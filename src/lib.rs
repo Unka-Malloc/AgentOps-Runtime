@@ -158,6 +158,35 @@ impl Finding {
     }
 }
 
+/// The aggregated answer a host asks before it owns an action.
+/// Gates only emit findings; `Verdict` folds them into one decision the
+/// channel applies — `managed-dispatch` and `outbound-boundary` hosts
+/// treat `Refuse` as fail-closed, `hook-observe` treats it as advisory.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Verdict {
+    Allow,
+    Warn,
+    Refuse,
+}
+
+impl Verdict {
+    /// Worst-severity fold: any `High` finding refuses, `Warn` warns.
+    pub fn of(findings: &[Finding]) -> Self {
+        findings
+            .iter()
+            .fold(Verdict::Allow, |v, f| match f.severity {
+                Severity::High => Verdict::Refuse,
+                Severity::Warn if v == Verdict::Allow => Verdict::Warn,
+                _ => v,
+            })
+    }
+
+    pub fn refused(&self) -> bool {
+        matches!(self, Verdict::Refuse)
+    }
+}
+
 /// Evidence record persisted by the runtime's stores. The shared schema
 /// keeps every gate's output queryable by the same projections.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -545,5 +574,27 @@ mod tests {
         assert_eq!(id, "memo/ok.json");
         assert_eq!(sink.read(&id).unwrap(), b"{}");
         let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod verdict_tests {
+    use super::{Finding, Severity, Verdict};
+
+    #[test]
+    fn verdict_folds_worst_severity() {
+        let f = |s: Severity| Finding::new("g", s, "m");
+        assert_eq!(Verdict::of(&[]), Verdict::Allow);
+        assert_eq!(Verdict::of(&[f(Severity::Info)]), Verdict::Allow);
+        assert_eq!(
+            Verdict::of(&[f(Severity::Warn), f(Severity::Info)]),
+            Verdict::Warn
+        );
+        assert_eq!(
+            Verdict::of(&[f(Severity::Warn), f(Severity::High)]),
+            Verdict::Refuse
+        );
+        assert!(Verdict::Refuse.refused());
+        assert!(!Verdict::Warn.refused());
     }
 }

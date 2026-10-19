@@ -31,7 +31,7 @@ fn flag_value(args: &[String], name: &str) -> Option<String> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  aor registry\n  aor observe <dispatch|compact|verify|close|toolcall> '<json>'\n  aor sweep\n  aor records [--gate G] [--limit N]\n  aor memory list [--kind K] [--limit N]\n  aor memory add --kind K --title T --body B [--tags a,b] [--source S]\n  aor import sqlite <db> <table> <kind>\n  aor import vault <dir>\n  aor import inbox <file>"
+        "usage:\n  aor registry\n  aor observe <dispatch|compact|verify|close|toolcall> '<json>'\n  aor check <dispatch|compact|verify|close|toolcall> '<json>'\n        exit 0 allow, 10 warn, 20 refuse — the outbound-boundary entry\n  aor sweep\n  aor records [--gate G] [--limit N]\n  aor memory list [--kind K] [--limit N]\n  aor memory add --kind K --title T --body B [--tags a,b] [--source S]\n  aor import sqlite <db> <table> <kind>\n  aor import vault <dir>\n  aor import inbox <file>"
     );
     std::process::exit(2)
 }
@@ -91,6 +91,31 @@ fn run() -> aor::Result<()> {
             let out = render_findings(&findings);
             if !out.is_empty() {
                 println!("{out}");
+            }
+        }
+        Some("check") => {
+            let kind = args.get(1).and_then(|s| event_kind(s));
+            let detail = args
+                .get(2)
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or(serde_json::Value::Null);
+            let kind = kind.ok_or_else(|| aor::Error::msg("unknown event kind"))?;
+            let rt = open_runtime()?;
+            let findings = rt.dispatch(&Event::new(kind, detail))?;
+            let out = render_findings(&findings);
+            if !out.is_empty() {
+                println!("{out}");
+            }
+            match aor::Verdict::of(&findings) {
+                aor::Verdict::Allow => println!("verdict: allow"),
+                aor::Verdict::Warn => {
+                    println!("verdict: warn");
+                    std::process::exit(10);
+                }
+                aor::Verdict::Refuse => {
+                    println!("verdict: refuse");
+                    std::process::exit(20);
+                }
             }
         }
         Some("sweep") => {
