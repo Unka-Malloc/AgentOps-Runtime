@@ -52,7 +52,7 @@ pub fn all_match(reports: &[ParityReport]) -> bool {
 }
 
 /// Columns consulted for a row timestamp, in priority order.
-const TS_COLUMNS: &[&str] = &["ts_ms", "ts", "created"];
+const TS_COLUMNS: &[&str] = &["ts_ms", "ts", "created", "updated"];
 
 /// Import every row of a SQLite table into the observation stream.
 ///
@@ -148,14 +148,21 @@ pub fn import_sqlite_table(
     Ok(report)
 }
 
-/// Interpret a column value as an epoch-milliseconds timestamp.
+/// Interpret a column value as an epoch-milliseconds timestamp. Values
+/// below 1e12 are epoch *seconds* (the anti-rot ledger stores REAL
+/// seconds); at or above they are already milliseconds.
 fn value_as_ms(v: &ValueRef<'_>) -> Option<u64> {
-    match v {
-        ValueRef::Integer(n) if *n >= 0 => Some(*n as u64),
-        ValueRef::Real(f) if *f >= 0.0 => Some(*f as u64),
-        ValueRef::Text(t) => std::str::from_utf8(t).ok()?.trim().parse::<u64>().ok(),
-        _ => None,
-    }
+    let raw = match v {
+        ValueRef::Integer(n) if *n >= 0 => *n as f64,
+        ValueRef::Real(f) if *f >= 0.0 => *f,
+        ValueRef::Text(t) => std::str::from_utf8(t).ok()?.trim().parse::<f64>().ok()?,
+        _ => return None,
+    };
+    Some(if raw < 1e12 {
+        (raw * 1000.0) as u64
+    } else {
+        raw as u64
+    })
 }
 
 /// Parsed bits of a markdown file's optional YAML frontmatter.
@@ -296,11 +303,12 @@ pub fn import_vault(dir: &Path, store: &dyn Store) -> Result<ImportReport> {
 
 /// Import an agent-memory JSONL inbox into curated memory.
 ///
-/// Each non-empty line is one JSON object `{kind, title, body, tags?,
+/// Each non-empty line is one JSON object `{kind, body, title?, tags?,
 /// source?, created_ms?, updated_ms?, ...}`; `{"noop": true}` lines are
-/// skipped. Lines missing `kind`/`title`/`body` and malformed JSON are
-/// skipped with a line-numbered note — one bad line never aborts the
-/// file. An unreadable `file` is `Err`.
+/// skipped. `title` defaults to the body's first line — real inboxes
+/// often carry kind+body only. Lines missing `kind`/`body` and malformed
+/// JSON are skipped with a line-numbered note — one bad line never
+/// aborts the file. An unreadable `file` is `Err`.
 pub fn import_jsonl_inbox(file: &Path, store: &dyn Store) -> Result<ImportReport> {
     let text = std::fs::read_to_string(file)
         .map_err(|e| Error::msg(format!("read {}: {e}", file.display())))?;
@@ -328,18 +336,23 @@ pub fn import_jsonl_inbox(file: &Path, store: &dyn Store) -> Result<ImportReport
             report.skipped += 1;
             continue;
         }
-        let (kind, title, body) = (
-            v.get("kind").and_then(serde_json::Value::as_str),
-            v.get("title").and_then(serde_json::Value::as_str),
-            v.get("body").and_then(serde_json::Value::as_str),
-        );
-        let (Some(kind), Some(title), Some(body)) = (kind, title, body) else {
+        let kind = v.get("kind").and_then(serde_json::Value::as_str);
+        // Writers disagree on the content key: body, fact, text, rule.
+        let body = ["body", "fact", "text", "rule"]
+            .iter()
+            .find_map(|k| v.get(*k).and_then(serde_json::Value::as_str));
+        let (Some(kind), Some(body)) = (kind, body) else {
             report.skipped += 1;
             report
                 .notes
-                .push(format!("line {line_no}: missing kind/title/body"));
+                .push(format!("line {line_no}: missing kind/body"));
             continue;
         };
+        let title = v
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .map(String::from)
+            .unwrap_or_else(|| body.lines().next().unwrap_or("").chars().take(60).collect());
         let tags = v
             .get("tags")
             .and_then(serde_json::Value::as_array)
@@ -358,7 +371,7 @@ pub fn import_jsonl_inbox(file: &Path, store: &dyn Store) -> Result<ImportReport
         let entry = MemoryEntry {
             id: 0,
             kind: kind.to_string(),
-            title: title.to_string(),
+            title,
             body: body.to_string(),
             tags,
             source,
@@ -471,12 +484,12 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO ledger (note, amount, ts_ms) VALUES ('alpha', 1.5, 1000)",
+            "INSERT INTO ledger (note, amount, ts_ms) VALUES ('alpha', 1.5, 1791306216750)",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO ledger (note, amount, ts_ms) VALUES (NULL, 2.5, 2000)",
+            "INSERT INTO ledger (note, amount, ts_ms) VALUES (NULL, 2.5, 1791306217750)",
             [],
         )
         .unwrap();
@@ -486,7 +499,7 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO ledger (note, amount, ts_ms) VALUES (x'0102', 0.0, 3000)",
+            "INSERT INTO ledger (note, amount, ts_ms) VALUES (x'0102', 0.0, 1791306218750)",
             [],
         )
         .unwrap();
@@ -510,15 +523,15 @@ mod tests {
         assert_eq!(obs.len(), 3);
         let (kind, detail, ts) = &obs[0];
         assert_eq!(kind, "ledger-row");
-        assert_eq!(*ts, 1000);
+        assert_eq!(*ts, 1791306216750);
         assert_eq!(detail["rowid"], 1);
         assert_eq!(detail["note"], "alpha");
         assert_eq!(detail["amount"], 1.5);
-        assert_eq!(detail["ts_ms"], 1000);
+        assert_eq!(detail["ts_ms"], 1791306216750i64);
         // NULL column serializes as JSON null.
         assert_eq!(obs[1].1["note"], serde_json::Value::Null);
         // Row without a ts column value falls back to now_ms().
-        assert!(obs[2].2 > 3000);
+        assert!(obs[2].2 > 1791306218750);
         assert_eq!(obs[2].1["note"], "gamma");
     }
 
